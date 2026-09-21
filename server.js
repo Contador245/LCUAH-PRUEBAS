@@ -117,6 +117,8 @@ app.post('/api/crear-sesion', async (req, res) => {
       code: 'MLC-' + Date.now().toString(36).toUpperCase(),
       name, email, zone: zonaInfo.nombre, seats, total,
       pagado: false,
+      usado: false,
+      usado_en: null,
     };
     guardarDB(db);
 
@@ -153,6 +155,72 @@ app.get('/api/boleto/:sessionId', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ estado: 'error' });
+  }
+});
+
+// Esta página se abre al escanear el QR del boleto (con el celular del staff en la puerta).
+// Primer escaneo: marca el boleto como usado y muestra "Válido". Segundo escaneo: avisa que ya entró.
+app.get('/verificar/:code', (req, res) => {
+  const db = leerDB();
+  const entrada = Object.values(db).find(t => t.code === req.params.code);
+
+  const pagina = (titulo, color, detalle) => `<!doctype html><html lang="es"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Verificación de boleto</title>
+    <style>body{font-family:sans-serif;background:#12131a;color:#fff;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:20px;text-align:center}
+    .card{background:#1e1f27;border-radius:18px;padding:32px;max-width:380px;width:100%}
+    h1{font-size:26px;color:${color};margin:0 0 10px}p{color:#98a0b5;line-height:1.5}</style></head>
+    <body><div class="card"><h1>${titulo}</h1><p>${detalle}</p></div></body></html>`;
+
+  if (!entrada || !entrada.pagado) {
+    return res.status(404).send(pagina('❌ Boleto no válido', '#ff1744', 'Este código no corresponde a un boleto pagado.'));
+  }
+
+  if (entrada.usado) {
+    return res.send(pagina('⚠️ Ya fue usado', '#ffb800', `Este boleto ya entró el ${new Date(entrada.usado_en).toLocaleString('es-MX')}. Titular: ${entrada.name}.`));
+  }
+
+  entrada.usado = true;
+  entrada.usado_en = new Date().toISOString();
+  guardarDB(db);
+  res.send(pagina('✅ Boleto válido', '#66f2a0', `${entrada.name} · ${entrada.zone} · Asientos: ${entrada.seats.join(', ')}. Acceso registrado.`));
+});
+
+// Cobro en efectivo (staff en taquilla): no pasa por Stripe, pero requiere la clave del servidor.
+// La clave vive en .env, nunca en el código del navegador, así no se puede ver con "Inspeccionar".
+app.post('/api/pago-efectivo', (req, res) => {
+  try {
+    const { name, email, zone, seats, clave } = req.body;
+
+    if (clave !== process.env.STAFF_CASH_CODE) {
+      return res.status(401).json({ error: 'Clave incorrecta' });
+    }
+
+    const zonaInfo = ZONAS[zone];
+    if (!zonaInfo) return res.status(400).json({ error: 'Zona inválida' });
+    if (!Array.isArray(seats) || seats.length < 1 || seats.length > 6) {
+      return res.status(400).json({ error: 'Selecciona entre 1 y 6 asientos' });
+    }
+    if (!name || !email) return res.status(400).json({ error: 'Faltan nombre o correo' });
+
+    const total = zonaInfo.precio * seats.length;
+    const ticket = {
+      code: 'MLC-' + Date.now().toString(36).toUpperCase(),
+      name, email, zone: zonaInfo.nombre, seats, total,
+      pagado: true,
+      metodo: 'efectivo',
+      usado: false,
+      usado_en: null,
+    };
+
+    const db = leerDB();
+    db['efectivo_' + ticket.code] = ticket;
+    guardarDB(db);
+
+    res.json({ ticket });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'No se pudo generar el boleto' });
   }
 });
 
